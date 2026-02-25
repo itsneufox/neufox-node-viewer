@@ -21,6 +21,7 @@ const IDX_AREA = 3;
 const IDX_V_FLAGS = 4;
 const IDX_V_ADJ = 5;
 const IDX_P_ADJ = 4;
+const INTERIOR_Z_MIN = 900;
 
 function getVehColor(flags, alpha = 1) {
   if (flags & FLAG_BOAT)      return `rgba(34,211,238,${alpha})`;
@@ -42,6 +43,7 @@ let filterLinksMin = null;
 let filterLinksMax = null;
 let filterVehFlagMask = 0;
 let filterVehFlagMode = 'any';
+let filterInteriorOnly = false;
 let showGrid    = true;
 let selectedType = null, selectedIdx = -1;
 
@@ -110,6 +112,7 @@ function getNodeLinkCount(node, isVeh) {
 
 function passesNodeFilters(node, isVeh) {
   const z = node[IDX_Z];
+  if (filterInteriorOnly && z < INTERIOR_Z_MIN) return false;
   if (filterZMin !== null && z < filterZMin) return false;
   if (filterZMax !== null && z > filterZMax) return false;
   const links = getNodeLinkCount(node, isVeh);
@@ -155,6 +158,7 @@ function updateFiltersBadge() {
   if (!badge) return;
   let count = 0;
   if (filterArea !== -1) count++;
+  if (filterInteriorOnly) count++;
   if (filterZMin !== null || filterZMax !== null) count++;
   if (filterLinksMin !== null || filterLinksMax !== null) count++;
   if (filterVehFlagMask !== 0) count++;
@@ -670,6 +674,7 @@ function initControls() {
   const flagModeEl = document.getElementById('filter-flag-mode');
   const flagInputs = VEH_FLAG_FILTERS.map(([id, bit]) => ({ el: document.getElementById(id), bit }));
   const areaEl = document.getElementById('filter-area');
+  const interiorOnlyEl = document.querySelector('#toggle-interiors input');
 
   const applyAdvancedFilters = () => {
     const nextZMin = parseNullableFloat(zMinEl.value);
@@ -715,6 +720,11 @@ function initControls() {
     updateLegend();
   });
 
+  interiorOnlyEl.addEventListener('change', e => {
+    filterInteriorOnly = e.target.checked;
+    redrawFiltered();
+  });
+
   areaEl.addEventListener('change', e => {
     filterArea = parseInt(e.target.value, 10);
     if (filterArea >= 0) {
@@ -741,8 +751,10 @@ function initControls() {
     linksMaxEl.value = '';
     flagModeEl.value = 'any';
     for (const { el } of flagInputs) el.checked = false;
+    interiorOnlyEl.checked = false;
 
     filterArea = -1;
+    filterInteriorOnly = false;
     filterZMin = null;
     filterZMax = null;
     filterLinksMin = null;
