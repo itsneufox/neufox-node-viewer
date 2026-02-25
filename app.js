@@ -158,7 +158,7 @@ function updateFiltersBadge() {
   if (!badge) return;
   let count = 0;
   if (filterArea !== -1) count++;
-  if (!showInteriors) count++;
+  if (showInteriors) count++;
   if (filterZMin !== null || filterZMax !== null) count++;
   if (filterLinksMin !== null || filterLinksMax !== null) count++;
   if (filterVehFlagMask !== 0) count++;
@@ -174,10 +174,12 @@ const NodeLayer = L.Layer.extend({
     this._drawZoom = map.getZoom();
     this._drawTopLeftLatLng = null;
     this._canvas = document.createElement('canvas');
+    this._ctx = this._canvas.getContext('2d');
     this._canvas.className = 'node-canvas leaflet-zoom-animated';
     map.getPanes().overlayPane.appendChild(this._canvas);
     map.on('resize', this._schedule, this);
-    map.on('move', this._schedule, this);
+    map.on('move', this._scheduleMove, this);
+    map.on('moveend', this._schedule, this);
     map.on('zoomstart', this._onZoomStart, this);
     map.on('zoomanim', this._onZoomAnim, this);
     map.on('zoomend', this._onZoomEnd, this);
@@ -186,7 +188,8 @@ const NodeLayer = L.Layer.extend({
 
   onRemove(map) {
     map.off('resize', this._schedule, this);
-    map.off('move', this._schedule, this);
+    map.off('move', this._scheduleMove, this);
+    map.off('moveend', this._schedule, this);
     map.off('zoomstart', this._onZoomStart, this);
     map.off('zoomanim', this._onZoomAnim, this);
     map.off('zoomend', this._onZoomEnd, this);
@@ -218,6 +221,10 @@ const NodeLayer = L.Layer.extend({
     });
   },
 
+  _scheduleMove() {
+    this._schedule(24);
+  },
+
   _onZoomStart() {
     if (this._drawTimer) {
       clearTimeout(this._drawTimer);
@@ -245,10 +252,10 @@ const NodeLayer = L.Layer.extend({
 
     const topLeft = map.containerPointToLayerPoint([0, 0]);
     L.DomUtil.setPosition(canvas, topLeft);
-    canvas.width  = size.x;
-    canvas.height = size.y;
+    if (canvas.width !== size.x) canvas.width = size.x;
+    if (canvas.height !== size.y) canvas.height = size.y;
 
-    const ctx  = canvas.getContext('2d');
+    const ctx  = this._ctx;
     ctx.clearRect(0, 0, size.x, size.y);
 
     const zoom   = map.getZoom();
@@ -260,7 +267,6 @@ const NodeLayer = L.Layer.extend({
     const west   = bounds.getWest(),  east  = bounds.getEast();
     const PAD    = 50;
     const visibleAreas = getVisibleAreas(bounds, PAD);
-
     const scale  = map.options.crs.scale(zoom);
     const origin = map.getPixelOrigin();
     const pane   = map._getMapPanePos();
@@ -412,6 +418,7 @@ function onMapClick(e) {
 
   const SNAP_PX  = Math.max(14, 28 - map.getZoom() * 2);
   const snapSq   = SNAP_PX * SNAP_PX;
+  const visibleAreas = getVisibleAreas(bounds, pad);
 
   let bestSq   = Infinity;
   let bestType = null;
@@ -419,7 +426,7 @@ function onMapClick(e) {
 
   const search = (nodes, type) => {
     const areaBuckets = type === 'v' ? nodesVByArea : nodesPByArea;
-    for (const area of getVisibleAreas(bounds, pad)) {
+    for (const area of visibleAreas) {
       const bucket = areaBuckets[area];
       if (!bucket || !bucket.length) continue;
       for (const i of bucket) {
@@ -457,11 +464,22 @@ function selectNode(type, idx, panTo = false) {
   showPanel(type, idx);
 }
 
-function clearSelection() {
+function clearSelection(redraw = true) {
   selectedType = null;
   selectedIdx  = -1;
-  nodeLayer.draw();
+  if (redraw && nodeLayer) nodeLayer.draw();
   hidePanel();
+}
+
+function getNeighborDirection(dx, dy) {
+  if (Math.hypot(dx, dy) < 0.001) return { arrow: '•', cardinal: 'HERE', bearing: 0, bucket: -1 };
+
+  const angleFromEast = Math.atan2(dy, dx) * (180 / Math.PI);
+  const bearing = (90 - angleFromEast + 360) % 360; // clockwise from North
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const arrows = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
+  const idx = Math.round(bearing / 45) % 8;
+  return { arrow: arrows[idx], cardinal: dirs[idx], bearing, bucket: idx };
 }
 
 function showPanel(type, idx) {
@@ -498,15 +516,31 @@ function showPanel(type, idx) {
   nl.innerHTML = '';
   if (adj && adj.length) {
     const targetNodes = type === 'v' ? nodesV : nodesP;
+    const neighbors = [];
     for (const nidx of adj) {
       const nb = targetNodes[nidx];
       if (!nb) continue;
+      const dx = nb[IDX_X] - x;
+      const dy = nb[IDX_Y] - y;
+      const dir = getNeighborDirection(dx, dy);
+      neighbors.push({ nidx, nb, dir });
+    }
+    neighbors.sort((a, b) => {
+      const bucketDiff = a.dir.bucket - b.dir.bucket;
+      if (bucketDiff !== 0) return bucketDiff;
+      const d = a.dir.bearing - b.dir.bearing;
+      if (Math.abs(d) > 0.0001) return d;
+      return a.nidx - b.nidx;
+    });
+
+    for (const { nidx, nb, dir } of neighbors) {
       const btn = document.createElement('button');
       btn.className = 'neighbor-btn';
       btn.innerHTML =
         `<span class="nb-idx">#${nidx}</span>` +
         `<span class="nb-coords">${nb[IDX_X].toFixed(0)}, ${nb[IDX_Y].toFixed(0)}, ${nb[IDX_Z].toFixed(0)}</span>` +
-        `<span class="nb-area">A${nb[IDX_AREA]}</span>`;
+        `<span class="nb-area">A${nb[IDX_AREA]}</span>` +
+        `<span class="nb-dir">${dir.arrow} ${dir.cardinal}</span>`;
       btn.addEventListener('click', () => selectNode(type, nidx, true));
       nl.appendChild(btn);
     }
@@ -648,8 +682,8 @@ function buildGridLayer() {
 
 function initControls() {
   const redrawFiltered = () => {
-    clearSelection();
-    nodeLayer.draw();
+    clearSelection(false);
+    if (nodeLayer) nodeLayer.draw();
     updateFiltersBadge();
   };
 

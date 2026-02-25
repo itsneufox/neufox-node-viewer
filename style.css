@@ -292,15 +292,21 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .neighbors-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
 .neighbors { display: flex; flex-direction: column; gap: 3px; }
 .neighbor-btn {
-  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 2px 8px; padding: 5px 8px;
   background: var(--surface2); border: 1px solid var(--border);
   border-radius: 4px; cursor: pointer; transition: border-color .1s;
   text-align: left; color: var(--text); width: 100%;
 }
 .neighbor-btn:hover { border-color: var(--accent); }
 .neighbor-btn .nb-idx { font-family: var(--mono); font-size: 10px; color: var(--muted); min-width: 50px; }
-.neighbor-btn .nb-coords { font-family: var(--mono); font-size: 10px; color: var(--text); }
-.neighbor-btn .nb-area { font-size: 10px; color: var(--muted); margin-left: auto; }
+.neighbor-btn .nb-coords { font-family: var(--mono); font-size: 10px; color: var(--text); min-width: 0; }
+.neighbor-btn .nb-area { font-size: 10px; color: var(--muted); margin-left: 0; }
+.neighbor-btn .nb-dir {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
 
 /* ── Loading overlay ──────────────────────────────── */
 #loading {
