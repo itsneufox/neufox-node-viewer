@@ -43,7 +43,7 @@ let filterLinksMin = null;
 let filterLinksMax = null;
 let filterVehFlagMask = 0;
 let filterVehFlagMode = 'any';
-let filterInteriorOnly = false;
+let showInteriors = false;
 let showGrid    = true;
 let selectedType = null, selectedIdx = -1;
 
@@ -112,7 +112,7 @@ function getNodeLinkCount(node, isVeh) {
 
 function passesNodeFilters(node, isVeh) {
   const z = node[IDX_Z];
-  if (filterInteriorOnly && z < INTERIOR_Z_MIN) return false;
+  if (!showInteriors && z >= INTERIOR_Z_MIN) return false;
   if (filterZMin !== null && z < filterZMin) return false;
   if (filterZMax !== null && z > filterZMax) return false;
   const links = getNodeLinkCount(node, isVeh);
@@ -158,7 +158,7 @@ function updateFiltersBadge() {
   if (!badge) return;
   let count = 0;
   if (filterArea !== -1) count++;
-  if (filterInteriorOnly) count++;
+  if (!showInteriors) count++;
   if (filterZMin !== null || filterZMax !== null) count++;
   if (filterLinksMin !== null || filterLinksMax !== null) count++;
   if (filterVehFlagMask !== 0) count++;
@@ -721,7 +721,7 @@ function initControls() {
   });
 
   interiorOnlyEl.addEventListener('change', e => {
-    filterInteriorOnly = e.target.checked;
+    showInteriors = e.target.checked;
     redrawFiltered();
   });
 
@@ -754,7 +754,7 @@ function initControls() {
     interiorOnlyEl.checked = false;
 
     filterArea = -1;
-    filterInteriorOnly = false;
+    showInteriors = false;
     filterZMin = null;
     filterZMax = null;
     filterLinksMin = null;
