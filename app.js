@@ -22,6 +22,7 @@ const IDX_V_FLAGS = 4;
 const IDX_V_ADJ = 5;
 const IDX_P_ADJ = 4;
 const INTERIOR_Z_MIN = 900;
+const HOVER_TOOLTIP_MIN_ZOOM = 1;
 
 function getVehColor(flags, alpha = 1) {
   if (flags & FLAG_BOAT)      return `rgba(34,211,238,${alpha})`;
@@ -29,6 +30,33 @@ function getVehColor(flags, alpha = 1) {
   if (flags & FLAG_HIGHWAY)   return `rgba(96,165,250,${alpha})`;
   if (flags & FLAG_PARKING)   return `rgba(251,191,36,${alpha})`;
   return `rgba(74,222,128,${alpha})`;
+}
+
+const SELECTED_LINK_COLORS = [
+
+  '#d32f2f', // red
+  '#1e88e5', // blue
+  '#fbc02d', // yellow
+  '#2e7d32', // green
+  '#f57c00', // orange
+  '#8e24aa', // purple
+  '#00838f', // cyan
+  '#c2185b', // magenta
+  '#5e35b1', // indigo
+  '#00695c', // deep teal-green
+  '#6d4c41', // brown
+  '#ffffff', // white fallback/high contrast
+];
+
+function hexToRgba(hex, alpha) {
+  const s = String(hex || '').trim();
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(s);
+  if (!m) return `rgba(249,115,22,${alpha})`;
+  const v = m[1];
+  const r = parseInt(v.slice(0, 2), 16);
+  const g = parseInt(v.slice(2, 4), 16);
+  const b = parseInt(v.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 let map, nodeLayer, gridLayer;
@@ -46,6 +74,8 @@ let filterVehFlagMode = 'any';
 let showInteriors = false;
 let showGrid    = true;
 let selectedType = null, selectedIdx = -1;
+let hoverRafId = null;
+let hoverPendingPoint = null;
 
 function initMap() {
   map = L.map('map', {
@@ -65,7 +95,11 @@ function initMap() {
     const { lat, lng } = e.latlng;
     document.getElementById('coords-display').textContent =
       `x: ${lng.toFixed(1)}  y: ${lat.toFixed(1)}`;
+    scheduleHoverTooltip(e);
   });
+  map.on('mouseout', hideHoverTooltip);
+  map.on('zoomstart', hideHoverTooltip);
+  map.on('movestart', hideHoverTooltip);
 
   map.on('click', onMapClick);
 
@@ -108,6 +142,44 @@ function getVisibleAreas(bounds, pad = 0) {
 function getNodeLinkCount(node, isVeh) {
   const adj = isVeh ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
   return adj ? adj.length : 0;
+}
+
+function findNearestVisibleNode(containerPoint, snapPx) {
+  if (!map) return null;
+  const bounds = map.getBounds();
+  const pad = 100;
+  const south = bounds.getSouth() - pad, north = bounds.getNorth() + pad;
+  const west  = bounds.getWest()  - pad, east  = bounds.getEast()  + pad;
+  const snapSq = snapPx * snapPx;
+  const visibleAreas = getVisibleAreas(bounds, pad);
+
+  let bestSq = Infinity;
+  let bestType = null;
+  let bestIdx = -1;
+
+  const search = (nodes, type) => {
+    const areaBuckets = type === 'v' ? nodesVByArea : nodesPByArea;
+    for (const area of visibleAreas) {
+      const bucket = areaBuckets[area];
+      if (!bucket || !bucket.length) continue;
+      for (const i of bucket) {
+        const n = nodes[i];
+        if (n[IDX_Y] < south || n[IDX_Y] > north || n[IDX_X] < west || n[IDX_X] > east) continue;
+        if (!passesNodeFilters(n, type === 'v')) continue;
+        const pt = map.latLngToContainerPoint([n[IDX_Y], n[IDX_X]]);
+        const dx = pt.x - containerPoint.x;
+        const dy = pt.y - containerPoint.y;
+        const d = dx * dx + dy * dy;
+        if (d < bestSq) { bestSq = d; bestType = type; bestIdx = i; }
+      }
+    }
+  };
+
+  if (showVeh) search(nodesV, 'v');
+  if (showPed) search(nodesP, 'p');
+
+  if (bestIdx < 0 || bestSq > snapSq) return null;
+  return { type: bestType, idx: bestIdx, distSq: bestSq };
 }
 
 function passesNodeFilters(node, isVeh) {
@@ -360,17 +432,23 @@ const NodeLayer = L.Layer.extend({
       const sel   = nodes[selectedIdx];
       if (!sel || !passesNodeFilters(sel, selectedType === 'v')) return;
       const selPx = toX(sel[IDX_X]), selPy = toY(sel[IDX_Y]);
-      const adj   = sel[selectedType === 'v' ? IDX_V_ADJ : IDX_P_ADJ];
+      const selectedNeighbors = getSortedNeighborEntries(selectedType, selectedIdx);
 
-      ctx.strokeStyle = 'rgba(249,115,22,0.8)';
       ctx.lineWidth   = Math.max(1, r * 0.8);
       ctx.lineCap     = 'round';
 
-      for (const nidx of adj) {
-        const nb = nodes[nidx];
-        if (!nb) continue;
+      for (const { nb, color } of selectedNeighbors) {
         const nbPx = toX(nb[IDX_X]), nbPy = toY(nb[IDX_Y]);
 
+        ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+        ctx.lineWidth = Math.max(2.8, r * 1.55);
+        ctx.beginPath();
+        ctx.moveTo(selPx, selPy);
+        ctx.lineTo(nbPx, nbPy);
+        ctx.stroke();
+
+        ctx.strokeStyle = hexToRgba(color, 0.9);
+        ctx.lineWidth = Math.max(1.4, r * 0.82);
         ctx.beginPath();
         ctx.moveTo(selPx, selPy);
         ctx.lineTo(nbPx, nbPy);
@@ -382,7 +460,7 @@ const NodeLayer = L.Layer.extend({
           const ux = dx / len, uy = dy / len;
           const ax = nbPx - ux * (r + 4), ay = nbPy - uy * (r + 4);
           const perp = Math.min(4, len * 0.2);
-          ctx.fillStyle = 'rgba(249,115,22,0.9)';
+          ctx.fillStyle = hexToRgba(color, 0.95);
           ctx.beginPath();
           ctx.moveTo(nbPx - ux * (r * 2 + 3), nbPy - uy * (r * 2 + 3));
           ctx.lineTo(ax - uy * perp, ay + ux * perp);
@@ -391,7 +469,12 @@ const NodeLayer = L.Layer.extend({
           ctx.fill();
         }
 
-        ctx.fillStyle = 'rgba(249,115,22,0.6)';
+        ctx.fillStyle = 'rgba(0,0,0,0.72)';
+        ctx.beginPath();
+        ctx.arc(nbPx, nbPy, r + 3.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = hexToRgba(color, 0.82);
         ctx.beginPath();
         ctx.arc(nbPx, nbPy, r + 2, 0, Math.PI * 2);
         ctx.fill();
@@ -408,49 +491,69 @@ const NodeLayer = L.Layer.extend({
   }
 });
 
-function onMapClick(e) {
-  const clickPt = e.containerPoint;
-  const bounds  = map.getBounds();
+function hideHoverTooltip() {
+  const el = document.getElementById('hover-tooltip');
+  if (!el) return;
+  el.classList.add('hidden');
+}
 
-  const pad = 100;
-  const south = bounds.getSouth() - pad, north = bounds.getNorth() + pad;
-  const west  = bounds.getWest()  - pad, east  = bounds.getEast()  + pad;
+function updateHoverTooltip(containerPoint, hit) {
+  const el = document.getElementById('hover-tooltip');
+  const wrap = document.getElementById('map-wrap');
+  if (!el || !wrap || !hit) return;
 
-  const SNAP_PX  = Math.max(14, 28 - map.getZoom() * 2);
-  const snapSq   = SNAP_PX * SNAP_PX;
-  const visibleAreas = getVisibleAreas(bounds, pad);
+  const nodes = hit.type === 'v' ? nodesV : nodesP;
+  const node = nodes[hit.idx];
+  if (!node) return;
+  const [x, y, z, area] = node;
 
-  let bestSq   = Infinity;
-  let bestType = null;
-  let bestIdx  = -1;
+  el.textContent = `${hit.type === 'v' ? 'V' : 'P'} #${hit.idx} (${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}) A${area}`;
+  el.classList.remove('hidden');
 
-  const search = (nodes, type) => {
-    const areaBuckets = type === 'v' ? nodesVByArea : nodesPByArea;
-    for (const area of visibleAreas) {
-      const bucket = areaBuckets[area];
-      if (!bucket || !bucket.length) continue;
-      for (const i of bucket) {
-        const n = nodes[i];
-        if (n[IDX_Y] < south || n[IDX_Y] > north || n[IDX_X] < west || n[IDX_X] > east) continue;
-        if (!passesNodeFilters(n, type === 'v')) continue;
-        const pt = map.latLngToContainerPoint([n[IDX_Y], n[IDX_X]]);
-        const dx = pt.x - clickPt.x;
-        const dy = pt.y - clickPt.y;
-        const d  = dx * dx + dy * dy;
-        if (d < bestSq) { bestSq = d; bestType = type; bestIdx = i; }
-      }
+  const wrapRect = wrap.getBoundingClientRect();
+  const tipRect = el.getBoundingClientRect();
+  const margin = 10;
+  let left = containerPoint.x + 14;
+  let top = containerPoint.y + 14;
+  if (left + tipRect.width > wrapRect.width - margin) left = containerPoint.x - tipRect.width - 14;
+  if (top + tipRect.height > wrapRect.height - margin) top = containerPoint.y - tipRect.height - 14;
+  left = Math.max(margin, Math.min(wrapRect.width - tipRect.width - margin, left));
+  top = Math.max(margin, Math.min(wrapRect.height - tipRect.height - margin, top));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function scheduleHoverTooltip(e) {
+  if (!nodeLayer || !map) return;
+  hoverPendingPoint = { x: e.containerPoint.x, y: e.containerPoint.y };
+  if (hoverRafId) return;
+
+  hoverRafId = requestAnimationFrame(() => {
+    hoverRafId = null;
+    const pt = hoverPendingPoint;
+    if (!pt || map._animatingZoom || map.getZoom() < HOVER_TOOLTIP_MIN_ZOOM) {
+      hideHoverTooltip();
+      return;
     }
-  };
+    const snapPx = Math.max(10, 22 - map.getZoom() * 1.5);
+    const hit = findNearestVisibleNode(pt, snapPx);
+    if (!hit) {
+      hideHoverTooltip();
+      return;
+    }
+    updateHoverTooltip(pt, hit);
+  });
+}
 
-  if (showVeh) search(nodesV, 'v');
-  if (showPed) search(nodesP, 'p');
-
-  if (bestIdx < 0 || bestSq > snapSq) {
+function onMapClick(e) {
+  const SNAP_PX  = Math.max(14, 28 - map.getZoom() * 2);
+  const hit = findNearestVisibleNode(e.containerPoint, SNAP_PX);
+  if (!hit) {
     clearSelection();
     return;
   }
 
-  selectNode(bestType, bestIdx);
+  selectNode(hit.type, hit.idx);
 }
 
 function selectNode(type, idx, panTo = false) {
@@ -471,6 +574,41 @@ function clearSelection(redraw = true) {
   hidePanel();
 }
 
+function fitPanelHeightToContent() {
+  const panel = document.getElementById('panel');
+  if (!panel || panel.classList.contains('hidden')) return;
+
+  const header = panel.querySelector('.panel-header');
+  const body = panel.querySelector('.panel-body');
+  const root = document.getElementById('ui');
+  if (!header || !body || !root) return;
+
+  const panelRect = panel.getBoundingClientRect();
+  const rootRect = root.getBoundingClientRect();
+  const topInRoot = panelRect.top - rootRect.top;
+  const maxHeight = Math.max(120, rootRect.height - topInRoot - 8);
+  const bodyStyles = getComputedStyle(body);
+  const bodyPadY =
+    (parseFloat(bodyStyles.paddingTop) || 0) +
+    (parseFloat(bodyStyles.paddingBottom) || 0);
+  let bodyContentHeight = 0;
+  for (const child of body.children) {
+    const cs = getComputedStyle(child);
+    bodyContentHeight += child.offsetHeight;
+    bodyContentHeight += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+  }
+  const desired = Math.ceil(header.offsetHeight + bodyPadY + bodyContentHeight + 2);
+  const baseMin = 220;
+  const requiredHeight = Math.min(maxHeight, Math.max(baseMin, desired));
+
+  panel.style.maxHeight = `${Math.floor(maxHeight)}px`;
+  panel.style.minHeight = `${Math.floor(requiredHeight)}px`;
+
+  if (panelRect.height < requiredHeight - 1) {
+    panel.style.height = `${Math.floor(requiredHeight)}px`;
+  }
+}
+
 function getNeighborDirection(dx, dy) {
   if (Math.hypot(dx, dy) < 0.001) return { arrow: '•', cardinal: 'HERE', bearing: 0, bucket: -1 };
 
@@ -480,6 +618,38 @@ function getNeighborDirection(dx, dy) {
   const arrows = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
   const idx = Math.round(bearing / 45) % 8;
   return { arrow: arrows[idx], cardinal: dirs[idx], bearing, bucket: idx };
+}
+
+function getSortedNeighborEntries(type, idx) {
+  const nodes = type === 'v' ? nodesV : nodesP;
+  const node = nodes[idx];
+  if (!node) return [];
+  const [x, y] = node;
+  const adj = type === 'v' ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
+  if (!adj || !adj.length) return [];
+
+  const neighbors = [];
+  for (const nidx of adj) {
+    const nb = nodes[nidx];
+    if (!nb) continue;
+    const dx = nb[IDX_X] - x;
+    const dy = nb[IDX_Y] - y;
+    const dir = getNeighborDirection(dx, dy);
+    neighbors.push({ nidx, nb, dir });
+  }
+
+  neighbors.sort((a, b) => {
+    const bucketDiff = a.dir.bucket - b.dir.bucket;
+    if (bucketDiff !== 0) return bucketDiff;
+    const d = a.dir.bearing - b.dir.bearing;
+    if (Math.abs(d) > 0.0001) return d;
+    return a.nidx - b.nidx;
+  });
+
+  for (let i = 0; i < neighbors.length; i++) {
+    neighbors[i].color = SELECTED_LINK_COLORS[i % SELECTED_LINK_COLORS.length];
+  }
+  return neighbors;
 }
 
 function showPanel(type, idx) {
@@ -515,32 +685,19 @@ function showPanel(type, idx) {
   const nl = document.getElementById('neighbor-list');
   nl.innerHTML = '';
   if (adj && adj.length) {
-    const targetNodes = type === 'v' ? nodesV : nodesP;
-    const neighbors = [];
-    for (const nidx of adj) {
-      const nb = targetNodes[nidx];
-      if (!nb) continue;
-      const dx = nb[IDX_X] - x;
-      const dy = nb[IDX_Y] - y;
-      const dir = getNeighborDirection(dx, dy);
-      neighbors.push({ nidx, nb, dir });
-    }
-    neighbors.sort((a, b) => {
-      const bucketDiff = a.dir.bucket - b.dir.bucket;
-      if (bucketDiff !== 0) return bucketDiff;
-      const d = a.dir.bearing - b.dir.bearing;
-      if (Math.abs(d) > 0.0001) return d;
-      return a.nidx - b.nidx;
-    });
-
-    for (const { nidx, nb, dir } of neighbors) {
+    for (const { nidx, nb, dir, color } of getSortedNeighborEntries(type, idx)) {
+      const dirStyle =
+        `--nb-dir-color:${color};` +
+        `--nb-dir-bg:${hexToRgba(color, 0.14)};` +
+        `--nb-dir-border:${hexToRgba(color, 0.34)};`;
       const btn = document.createElement('button');
       btn.className = 'neighbor-btn';
+      btn.style.setProperty('--nb-link-color', color);
       btn.innerHTML =
         `<span class="nb-idx">#${nidx}</span>` +
-        `<span class="nb-coords">${nb[IDX_X].toFixed(0)}, ${nb[IDX_Y].toFixed(0)}, ${nb[IDX_Z].toFixed(0)}</span>` +
+        `<span class="nb-coords">(${nb[IDX_X].toFixed(0)}, ${nb[IDX_Y].toFixed(0)}, ${nb[IDX_Z].toFixed(0)})</span>` +
         `<span class="nb-area">A${nb[IDX_AREA]}</span>` +
-        `<span class="nb-dir">${dir.arrow} ${dir.cardinal}</span>`;
+        `<span class="nb-dir" style="${dirStyle}">${dir.arrow} ${dir.cardinal}</span>`;
       btn.addEventListener('click', () => selectNode(type, nidx, true));
       nl.appendChild(btn);
     }
@@ -549,6 +706,7 @@ function showPanel(type, idx) {
   }
 
   document.getElementById('panel').classList.remove('hidden');
+  fitPanelHeightToContent();
 }
 
 function renderFlagTags(flags) {
@@ -596,6 +754,7 @@ function initPanelDrag() {
     panel.style.left = `${clampedLeft}px`;
     panel.style.top = `${clampedTop}px`;
     panel.style.right = 'auto';
+    fitPanelHeightToContent();
   };
 
   const onPointerMove = (e) => {
@@ -623,6 +782,7 @@ function initPanelDrag() {
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('pointerup', stopDrag);
     window.removeEventListener('pointercancel', stopDrag);
+    fitPanelHeightToContent();
   };
 
   header.addEventListener('pointerdown', (e) => {
@@ -645,6 +805,21 @@ function initPanelDrag() {
   });
 
   window.addEventListener('resize', clampToRoot);
+
+  const updatePanelFontScale = () => {
+    const w = panel.getBoundingClientRect().width || 280;
+    const scale = Math.max(1, Math.min(1.3, 1 + ((w - 280) / 800)));
+    panel.style.setProperty('--panel-font-scale', scale.toFixed(3));
+  };
+
+  updatePanelFontScale();
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(() => {
+      updatePanelFontScale();
+      fitPanelHeightToContent();
+    });
+    ro.observe(panel);
+  }
 }
 
 function buildGridLayer() {
