@@ -6,7 +6,7 @@ Interactive map viewer for GTA San Andreas path nodes. Click any node to see its
 
 GTA SA uses a system of 64 `NODES*.DAT` files (one per 750×750 unit sector) to define where vehicles and pedestrians can drive/walk. Each node is a point in 3D space; connections between nodes form the road/path network the game uses for navigation.
 
-This viewer lets you explore that network visually, useful for understanding how NPC routing works, debugging custom NPC paths, or just curiosity.
+This viewer lets you explore that network visually, useful for understanding how NPC routing works, debugging NPC paths on your server, or just curiosity.
 
 ## Node colors (vehicle)
 
