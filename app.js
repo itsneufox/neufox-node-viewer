@@ -1,0 +1,887 @@
+const SA_BOUNDS = [[-3000, -3000], [3000, 3000]];
+
+const FLAG_ROADBLOCK    = 1 << 6;
+const FLAG_BOAT         = 1 << 7;
+const FLAG_EMERGENCY    = 1 << 8;
+const FLAG_NOT_HIGHWAY  = 1 << 12;
+const FLAG_HIGHWAY      = 1 << 13;
+const FLAG_PARKING      = 1 << 21;
+const VEH_FLAG_FILTERS = [
+  ['flag-highway', FLAG_HIGHWAY],
+  ['flag-not-highway', FLAG_NOT_HIGHWAY],
+  ['flag-emergency', FLAG_EMERGENCY],
+  ['flag-boat', FLAG_BOAT],
+  ['flag-parking', FLAG_PARKING],
+  ['flag-roadblock', FLAG_ROADBLOCK],
+];
+const IDX_X = 0;
+const IDX_Y = 1;
+const IDX_Z = 2;
+const IDX_AREA = 3;
+const IDX_V_FLAGS = 4;
+const IDX_V_ADJ = 5;
+const IDX_P_ADJ = 4;
+
+function getVehColor(flags, alpha = 1) {
+  if (flags & FLAG_BOAT)      return `rgba(34,211,238,${alpha})`;
+  if (flags & FLAG_EMERGENCY) return `rgba(248,113,113,${alpha})`;
+  if (flags & FLAG_HIGHWAY)   return `rgba(96,165,250,${alpha})`;
+  if (flags & FLAG_PARKING)   return `rgba(251,191,36,${alpha})`;
+  return `rgba(74,222,128,${alpha})`;
+}
+
+let map, nodeLayer, gridLayer;
+let nodesV = [], nodesP = [];
+let nodesVByArea = [];
+let nodesPByArea = [];
+let showVeh = true, showPed = true;
+let filterArea  = -1;
+let filterZMin = null;
+let filterZMax = null;
+let filterLinksMin = null;
+let filterLinksMax = null;
+let filterVehFlagMask = 0;
+let filterVehFlagMode = 'any';
+let showGrid    = true;
+let selectedType = null, selectedIdx = -1;
+
+function initMap() {
+  map = L.map('map', {
+    crs: L.CRS.Simple,
+    center: [0, 0],
+    zoom: 1,
+    minZoom: -3,
+    maxZoom: 6,
+    zoomControl: true,
+    attributionControl: false,
+  });
+
+  L.imageOverlay('samap.png', SA_BOUNDS).addTo(map);
+  map.fitBounds(SA_BOUNDS);
+
+  map.on('mousemove', e => {
+    const { lat, lng } = e.latlng;
+    document.getElementById('coords-display').textContent =
+      `x: ${lng.toFixed(1)}  y: ${lat.toFixed(1)}`;
+  });
+
+  map.on('click', onMapClick);
+
+  return map;
+}
+
+function buildAreaIndex(nodes) {
+  const buckets = Array.from({ length: 64 }, () => []);
+  for (let i = 0; i < nodes.length; i++) {
+    const area = nodes[i][IDX_AREA];
+    if (area >= 0 && area < 64) buckets[area].push(i);
+  }
+  return buckets;
+}
+
+function getVisibleAreas(bounds, pad = 0) {
+  if (filterArea !== -1) return [filterArea];
+
+  const south = bounds.getSouth() - pad;
+  const north = bounds.getNorth() + pad;
+  const west = bounds.getWest() - pad;
+  const east = bounds.getEast() + pad;
+
+  if (east < -3000 || west > 3000 || north < -3000 || south > 3000) return [];
+
+  const minCol = Math.max(0, Math.min(7, Math.floor((west + 3000) / 750)));
+  const maxCol = Math.max(0, Math.min(7, Math.floor((east + 3000) / 750)));
+  const minRow = Math.max(0, Math.min(7, Math.floor((south + 3000) / 750)));
+  const maxRow = Math.max(0, Math.min(7, Math.floor((north + 3000) / 750)));
+
+  const areas = [];
+  for (let row = minRow; row <= maxRow; row++) {
+    for (let col = minCol; col <= maxCol; col++) {
+      areas.push(row * 8 + col);
+    }
+  }
+  return areas;
+}
+
+function getNodeLinkCount(node, isVeh) {
+  const adj = isVeh ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
+  return adj ? adj.length : 0;
+}
+
+function passesNodeFilters(node, isVeh) {
+  const z = node[IDX_Z];
+  if (filterZMin !== null && z < filterZMin) return false;
+  if (filterZMax !== null && z > filterZMax) return false;
+  const links = getNodeLinkCount(node, isVeh);
+  if (filterLinksMin !== null && links < filterLinksMin) return false;
+  if (filterLinksMax !== null && links > filterLinksMax) return false;
+  if (isVeh && filterVehFlagMask) {
+    const flags = node[IDX_V_FLAGS];
+    if (filterVehFlagMode === 'all') {
+      if ((flags & filterVehFlagMask) !== filterVehFlagMask) return false;
+    } else if ((flags & filterVehFlagMask) === 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getZRange(nodes) {
+  if (!nodes.length) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const node of nodes) {
+    const z = node[IDX_Z];
+    if (z < min) min = z;
+    if (z > max) max = z;
+  }
+  return Number.isFinite(min) ? { min, max } : null;
+}
+
+function getLinkRange(nodes, isVeh) {
+  if (!nodes.length) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const node of nodes) {
+    const links = getNodeLinkCount(node, isVeh);
+    if (links < min) min = links;
+    if (links > max) max = links;
+  }
+  return Number.isFinite(min) ? { min, max } : null;
+}
+
+function updateFiltersBadge() {
+  const badge = document.getElementById('filters-active');
+  if (!badge) return;
+  let count = 0;
+  if (filterArea !== -1) count++;
+  if (filterZMin !== null || filterZMax !== null) count++;
+  if (filterLinksMin !== null || filterLinksMax !== null) count++;
+  if (filterVehFlagMask !== 0) count++;
+  badge.textContent = `${count}`;
+  badge.classList.toggle('hidden', count === 0);
+}
+
+const NodeLayer = L.Layer.extend({
+  onAdd(map) {
+    this._map    = map;
+    this._rafId  = null;
+    this._drawTimer = null;
+    this._drawZoom = map.getZoom();
+    this._drawTopLeftLatLng = null;
+    this._canvas = document.createElement('canvas');
+    this._canvas.className = 'node-canvas leaflet-zoom-animated';
+    map.getPanes().overlayPane.appendChild(this._canvas);
+    map.on('resize', this._schedule, this);
+    map.on('move', this._schedule, this);
+    map.on('zoomstart', this._onZoomStart, this);
+    map.on('zoomanim', this._onZoomAnim, this);
+    map.on('zoomend', this._onZoomEnd, this);
+    this.draw();
+  },
+
+  onRemove(map) {
+    map.off('resize', this._schedule, this);
+    map.off('move', this._schedule, this);
+    map.off('zoomstart', this._onZoomStart, this);
+    map.off('zoomanim', this._onZoomAnim, this);
+    map.off('zoomend', this._onZoomEnd, this);
+    if (this._drawTimer) {
+      clearTimeout(this._drawTimer);
+      this._drawTimer = null;
+    }
+    this._canvas.remove();
+  },
+
+  _schedule(delay = 0) {
+    if (typeof delay !== 'number') delay = 0;
+    if (this._map._animatingZoom) return;
+    if (this._drawTimer) {
+      clearTimeout(this._drawTimer);
+      this._drawTimer = null;
+    }
+    if (delay > 0) {
+      this._drawTimer = setTimeout(() => {
+        this._drawTimer = null;
+        this._schedule(0);
+      }, delay);
+      return;
+    }
+    if (this._rafId) return;
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = null;
+      this.draw();
+    });
+  },
+
+  _onZoomStart() {
+    if (this._drawTimer) {
+      clearTimeout(this._drawTimer);
+      this._drawTimer = null;
+    }
+  },
+
+  _onZoomEnd() {
+    this._schedule(0);
+  },
+
+  _onZoomAnim(e) {
+    if (!this._drawTopLeftLatLng) return;
+    const scale = this._map.getZoomScale(e.zoom, this._drawZoom);
+    const topLeft = this._map._latLngToNewLayerPoint(this._drawTopLeftLatLng, e.zoom, e.center);
+    L.DomUtil.setTransform(this._canvas, topLeft, scale);
+  },
+
+  draw() {
+    if (this._map._animatingZoom) return;
+
+    const map    = this._map;
+    const size   = map.getSize();
+    const canvas = this._canvas;
+
+    const topLeft = map.containerPointToLayerPoint([0, 0]);
+    L.DomUtil.setPosition(canvas, topLeft);
+    canvas.width  = size.x;
+    canvas.height = size.y;
+
+    const ctx  = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size.x, size.y);
+
+    const zoom   = map.getZoom();
+    this._drawZoom = zoom;
+    this._drawTopLeftLatLng = map.layerPointToLatLng(topLeft);
+    const r      = Math.max(1.5, Math.min(5, zoom + 3));
+    const bounds = map.getBounds();
+    const south  = bounds.getSouth(), north = bounds.getNorth();
+    const west   = bounds.getWest(),  east  = bounds.getEast();
+    const PAD    = 50;
+    const visibleAreas = getVisibleAreas(bounds, PAD);
+
+    const scale  = map.options.crs.scale(zoom);
+    const origin = map.getPixelOrigin();
+    const pane   = map._getMapPanePos();
+    const offX   = -origin.x + pane.x;
+    const offY   = -origin.y + pane.y;
+    const toX    = (sa_x) =>  scale * sa_x + offX;
+    const toY    = (sa_y) => -scale * sa_y + offY;
+
+    const collectGroups = (nodes, areaBuckets, isVeh) => {
+      const groups = new Map();
+
+      for (const area of visibleAreas) {
+        const bucket = areaBuckets[area];
+        if (!bucket || !bucket.length) continue;
+        for (const i of bucket) {
+          const node = nodes[i];
+          const nx = node[IDX_X], ny = node[IDX_Y];
+          if (ny < south - PAD || ny > north + PAD) continue;
+          if (nx < west  - PAD || nx > east  + PAD) continue;
+          if (!passesNodeFilters(node, isVeh)) continue;
+          const color = isVeh ? getVehColor(node[IDX_V_FLAGS]) : 'rgba(167,139,250,1)';
+          if (!groups.has(color)) groups.set(color, []);
+          groups.get(color).push(i);
+        }
+      }
+      return groups;
+    };
+
+    const drawConnections = (nodes, isVeh, groups) => {
+      if (zoom < -1 || !groups) return;
+      ctx.lineWidth = Math.max(0.5, r * 0.4);
+      for (const [color, indices] of groups) {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        for (const i of indices) {
+          const node = nodes[i];
+          const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
+          const adj = isVeh ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
+          if (!adj || !adj.length) continue;
+          for (const nidx of adj) {
+            const nb = nodes[nidx];
+            if (!nb) continue;
+            ctx.moveTo(px, py);
+            ctx.lineTo(toX(nb[IDX_X]), toY(nb[IDX_Y]));
+          }
+        }
+        ctx.stroke();
+      }
+    };
+
+    const drawNodes = (nodes, groups) => {
+      if (!groups) return;
+      for (const [color, indices] of groups) {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        for (const i of indices) {
+          const node = nodes[i];
+          const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
+          ctx.moveTo(px + r, py);
+          ctx.arc(px, py, r, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      if (r >= 3) {
+        const ir = r * 0.42;
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.beginPath();
+        for (const indices of groups.values()) {
+          for (const i of indices) {
+            const node = nodes[i];
+            const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
+            ctx.moveTo(px + ir, py);
+            ctx.arc(px, py, ir, 0, Math.PI * 2);
+          }
+        }
+        ctx.fill();
+      }
+    };
+
+    const pedGroups = (showPed && nodesP.length) ? collectGroups(nodesP, nodesPByArea, false) : null;
+    const vehGroups = (showVeh && nodesV.length) ? collectGroups(nodesV, nodesVByArea, true) : null;
+
+    drawConnections(nodesP, false, pedGroups);
+    drawConnections(nodesV, true, vehGroups);
+    drawNodes(nodesP, pedGroups);
+    drawNodes(nodesV, vehGroups);
+
+    if (selectedIdx >= 0) {
+      const nodes = selectedType === 'v' ? nodesV : nodesP;
+      const sel   = nodes[selectedIdx];
+      if (!sel || !passesNodeFilters(sel, selectedType === 'v')) return;
+      const selPx = toX(sel[IDX_X]), selPy = toY(sel[IDX_Y]);
+      const adj   = sel[selectedType === 'v' ? IDX_V_ADJ : IDX_P_ADJ];
+
+      ctx.strokeStyle = 'rgba(249,115,22,0.8)';
+      ctx.lineWidth   = Math.max(1, r * 0.8);
+      ctx.lineCap     = 'round';
+
+      for (const nidx of adj) {
+        const nb = nodes[nidx];
+        if (!nb) continue;
+        const nbPx = toX(nb[IDX_X]), nbPy = toY(nb[IDX_Y]);
+
+        ctx.beginPath();
+        ctx.moveTo(selPx, selPy);
+        ctx.lineTo(nbPx, nbPy);
+        ctx.stroke();
+
+        const dx = nbPx - selPx, dy = nbPy - selPy;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 1) {
+          const ux = dx / len, uy = dy / len;
+          const ax = nbPx - ux * (r + 4), ay = nbPy - uy * (r + 4);
+          const perp = Math.min(4, len * 0.2);
+          ctx.fillStyle = 'rgba(249,115,22,0.9)';
+          ctx.beginPath();
+          ctx.moveTo(nbPx - ux * (r * 2 + 3), nbPy - uy * (r * 2 + 3));
+          ctx.lineTo(ax - uy * perp, ay + ux * perp);
+          ctx.lineTo(ax + uy * perp, ay - ux * perp);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        ctx.fillStyle = 'rgba(249,115,22,0.6)';
+        ctx.beginPath();
+        ctx.arc(nbPx, nbPy, r + 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = '#f97316';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(selPx, selPy, r + 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+});
+
+function onMapClick(e) {
+  const clickPt = e.containerPoint;
+  const bounds  = map.getBounds();
+
+  const pad = 100;
+  const south = bounds.getSouth() - pad, north = bounds.getNorth() + pad;
+  const west  = bounds.getWest()  - pad, east  = bounds.getEast()  + pad;
+
+  const SNAP_PX  = Math.max(14, 28 - map.getZoom() * 2);
+  const snapSq   = SNAP_PX * SNAP_PX;
+
+  let bestSq   = Infinity;
+  let bestType = null;
+  let bestIdx  = -1;
+
+  const search = (nodes, type) => {
+    const areaBuckets = type === 'v' ? nodesVByArea : nodesPByArea;
+    for (const area of getVisibleAreas(bounds, pad)) {
+      const bucket = areaBuckets[area];
+      if (!bucket || !bucket.length) continue;
+      for (const i of bucket) {
+        const n = nodes[i];
+        if (n[IDX_Y] < south || n[IDX_Y] > north || n[IDX_X] < west || n[IDX_X] > east) continue;
+        if (!passesNodeFilters(n, type === 'v')) continue;
+        const pt = map.latLngToContainerPoint([n[IDX_Y], n[IDX_X]]);
+        const dx = pt.x - clickPt.x;
+        const dy = pt.y - clickPt.y;
+        const d  = dx * dx + dy * dy;
+        if (d < bestSq) { bestSq = d; bestType = type; bestIdx = i; }
+      }
+    }
+  };
+
+  if (showVeh) search(nodesV, 'v');
+  if (showPed) search(nodesP, 'p');
+
+  if (bestIdx < 0 || bestSq > snapSq) {
+    clearSelection();
+    return;
+  }
+
+  selectNode(bestType, bestIdx);
+}
+
+function selectNode(type, idx, panTo = false) {
+  selectedType = type;
+  selectedIdx  = idx;
+  if (panTo) {
+    const node = type === 'v' ? nodesV[idx] : nodesP[idx];
+    map.setView([node[IDX_Y], node[IDX_X]], Math.max(map.getZoom(), 2), { animate: true });
+  }
+  nodeLayer.draw();
+  showPanel(type, idx);
+}
+
+function clearSelection() {
+  selectedType = null;
+  selectedIdx  = -1;
+  nodeLayer.draw();
+  hidePanel();
+}
+
+function showPanel(type, idx) {
+  const node    = type === 'v' ? nodesV[idx] : nodesP[idx];
+  const [x, y, z, area] = node;
+  const flags   = type === 'v' ? node[IDX_V_FLAGS] : null;
+  const adj     = type === 'v' ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
+
+  const sectorCol = area % 8;
+  const sectorRow = Math.floor(area / 8);
+  const sectorX   = -3000 + sectorCol * 750;
+  const sectorY   = -3000 + sectorRow * 750;
+
+  document.getElementById('info-idx').textContent    = idx;
+  document.getElementById('info-type').textContent   = type === 'v' ? 'Vehicle' : 'Pedestrian';
+  document.getElementById('info-area').textContent   = `${area}`;
+  document.getElementById('info-x').textContent      = x.toFixed(1);
+  document.getElementById('info-y').textContent      = y.toFixed(1);
+  document.getElementById('info-z').textContent      = z.toFixed(1);
+  document.getElementById('info-sector').textContent =
+    `(${sectorX} → ${sectorX+750}, ${sectorY} → ${sectorY+750})`;
+  document.getElementById('info-links').textContent  = adj ? adj.length : 0;
+
+  if (flags !== null) {
+    document.getElementById('info-flags').textContent = `0x${flags.toString(16).toUpperCase().padStart(8,'0')}`;
+    document.getElementById('info-flags').parentElement.style.display = '';
+    renderFlagTags(flags);
+  } else {
+    document.getElementById('info-flags').parentElement.style.display = 'none';
+    document.getElementById('flag-tags').innerHTML = '';
+  }
+
+  const nl = document.getElementById('neighbor-list');
+  nl.innerHTML = '';
+  if (adj && adj.length) {
+    const targetNodes = type === 'v' ? nodesV : nodesP;
+    for (const nidx of adj) {
+      const nb = targetNodes[nidx];
+      if (!nb) continue;
+      const btn = document.createElement('button');
+      btn.className = 'neighbor-btn';
+      btn.innerHTML =
+        `<span class="nb-idx">#${nidx}</span>` +
+        `<span class="nb-coords">${nb[IDX_X].toFixed(0)}, ${nb[IDX_Y].toFixed(0)}, ${nb[IDX_Z].toFixed(0)}</span>` +
+        `<span class="nb-area">A${nb[IDX_AREA]}</span>`;
+      btn.addEventListener('click', () => selectNode(type, nidx, true));
+      nl.appendChild(btn);
+    }
+  } else {
+    nl.innerHTML = '<div style="color:var(--muted);font-size:12px">No connections</div>';
+  }
+
+  document.getElementById('panel').classList.remove('hidden');
+}
+
+function renderFlagTags(flags) {
+  const defs = [
+    { label: 'Highway',       bit: FLAG_HIGHWAY,    active: !!(flags & FLAG_HIGHWAY) },
+    { label: 'Not highway',   bit: FLAG_NOT_HIGHWAY,active: !!(flags & FLAG_NOT_HIGHWAY) },
+    { label: 'Emergency',     bit: FLAG_EMERGENCY,  active: !!(flags & FLAG_EMERGENCY) },
+    { label: 'Boat',          bit: FLAG_BOAT,       active: !!(flags & FLAG_BOAT) },
+    { label: 'Parking',       bit: FLAG_PARKING,    active: !!(flags & FLAG_PARKING) },
+    { label: 'Road block',    bit: FLAG_ROADBLOCK,  active: !!(flags & FLAG_ROADBLOCK) },
+    { label: `Traffic ${(flags >> 4) & 0x3}`,  bit: -1, active: true },
+    { label: `Links: ${flags & 0xF}`, bit: -1, active: true },
+  ];
+
+  const el = document.getElementById('flag-tags');
+  el.innerHTML = defs.map(d =>
+    `<span class="flag-tag${d.active && d.bit !== -1 ? ' active' : ''}">${d.label}</span>`
+  ).join('');
+}
+
+function hidePanel() {
+  document.getElementById('panel').classList.add('hidden');
+}
+
+function initPanelDrag() {
+  const panel = document.getElementById('panel');
+  const header = panel.querySelector('.panel-header');
+  const root = document.getElementById('ui');
+
+  let dragging = false;
+  let offsetX = 0;
+  let offsetY = 0;
+  let pointerId = null;
+
+  const clampToRoot = () => {
+    if (panel.classList.contains('hidden')) return;
+    const rootRect = root.getBoundingClientRect();
+    const rect = panel.getBoundingClientRect();
+    const maxLeft = Math.max(0, rootRect.width - rect.width);
+    const maxTop = Math.max(0, rootRect.height - rect.height);
+    const left = rect.left - rootRect.left;
+    const top = rect.top - rootRect.top;
+    const clampedLeft = Math.max(0, Math.min(maxLeft, left));
+    const clampedTop = Math.max(0, Math.min(maxTop, top));
+    panel.style.left = `${clampedLeft}px`;
+    panel.style.top = `${clampedTop}px`;
+    panel.style.right = 'auto';
+  };
+
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    if (pointerId !== null && e.pointerId !== pointerId) return;
+    const rootRect = root.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const maxLeft = Math.max(0, rootRect.width - panelRect.width);
+    const maxTop = Math.max(0, rootRect.height - panelRect.height);
+    const left = e.clientX - rootRect.left - offsetX;
+    const top = e.clientY - rootRect.top - offsetY;
+    panel.style.left = `${Math.max(0, Math.min(maxLeft, left))}px`;
+    panel.style.top = `${Math.max(0, Math.min(maxTop, top))}px`;
+    panel.style.right = 'auto';
+  };
+
+  const stopDrag = (e) => {
+    if (!dragging) return;
+    if (e && pointerId !== null && e.pointerId !== pointerId) return;
+    dragging = false;
+    if (pointerId !== null) {
+      try { header.releasePointerCapture(pointerId); } catch {}
+    }
+    pointerId = null;
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', stopDrag);
+    window.removeEventListener('pointercancel', stopDrag);
+  };
+
+  header.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('#panel-close')) return;
+    const rootRect = root.getBoundingClientRect();
+    const rect = panel.getBoundingClientRect();
+    panel.style.left = `${rect.left - rootRect.left}px`;
+    panel.style.top = `${rect.top - rootRect.top}px`;
+    panel.style.right = 'auto';
+    offsetX = e.clientX - rect.left;
+    offsetY = e.clientY - rect.top;
+    dragging = true;
+    pointerId = e.pointerId;
+    try { header.setPointerCapture(pointerId); } catch {}
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', stopDrag);
+    window.addEventListener('pointercancel', stopDrag);
+    e.preventDefault();
+  });
+
+  window.addEventListener('resize', clampToRoot);
+}
+
+function buildGridLayer() {
+  const lines = [];
+  for (let col = 0; col <= 8; col++) {
+    const x = -3000 + col * 750;
+    lines.push(L.polyline([[-3000, x], [3000, x]], {
+      color: 'rgba(255,255,255,0.25)', weight: 1, interactive: false
+    }));
+  }
+  for (let row = 0; row <= 8; row++) {
+    const y = -3000 + row * 750;
+    lines.push(L.polyline([[y, -3000], [y, 3000]], {
+      color: 'rgba(255,255,255,0.25)', weight: 1, interactive: false
+    }));
+  }
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      const area = row * 8 + col;
+      const cy = -3000 + row * 750 + 375;
+      const cx = -3000 + col * 750 + 375;
+      lines.push(L.marker([cy, cx], {
+        interactive: false,
+        icon: L.divIcon({
+          className: 'sector-label',
+          html: `<span>${area}</span>`,
+          iconSize: [40, 20],
+          iconAnchor: [20, 10],
+        })
+      }));
+    }
+  }
+  return L.layerGroup(lines);
+}
+
+function initControls() {
+  const redrawFiltered = () => {
+    clearSelection();
+    nodeLayer.draw();
+    updateFiltersBadge();
+  };
+
+  const parseNullableFloat = (value) => {
+    const s = value.trim();
+    if (s === '') return null;
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const parseNullableInt = (value) => {
+    const s = value.trim();
+    if (s === '') return null;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const zMinEl = document.getElementById('filter-z-min');
+  const zMaxEl = document.getElementById('filter-z-max');
+  const linksMinEl = document.getElementById('filter-links-min');
+  const linksMaxEl = document.getElementById('filter-links-max');
+  const flagModeEl = document.getElementById('filter-flag-mode');
+  const flagInputs = VEH_FLAG_FILTERS.map(([id, bit]) => ({ el: document.getElementById(id), bit }));
+  const areaEl = document.getElementById('filter-area');
+
+  const applyAdvancedFilters = () => {
+    const nextZMin = parseNullableFloat(zMinEl.value);
+    const nextZMax = parseNullableFloat(zMaxEl.value);
+    const nextLinksMin = parseNullableInt(linksMinEl.value);
+    const nextLinksMax = parseNullableInt(linksMaxEl.value);
+
+    const zInvalid = nextZMin !== null && nextZMax !== null && nextZMin > nextZMax;
+    const linksInvalid =
+      (nextLinksMin !== null && nextLinksMin < 0) ||
+      (nextLinksMax !== null && nextLinksMax < 0) ||
+      (nextLinksMin !== null && nextLinksMax !== null && nextLinksMin > nextLinksMax);
+
+    zMinEl.style.borderColor = zInvalid ? '#f87171' : '';
+    zMaxEl.style.borderColor = zInvalid ? '#f87171' : '';
+    linksMinEl.style.borderColor = linksInvalid ? '#f87171' : '';
+    linksMaxEl.style.borderColor = linksInvalid ? '#f87171' : '';
+    if (zInvalid || linksInvalid) return;
+
+    filterZMin = nextZMin;
+    filterZMax = nextZMax;
+    filterLinksMin = nextLinksMin;
+    filterLinksMax = nextLinksMax;
+    filterVehFlagMode = flagModeEl.value === 'all' ? 'all' : 'any';
+    let mask = 0;
+    for (const { el, bit } of flagInputs) {
+      if (el.checked) mask |= bit;
+    }
+    filterVehFlagMask = mask;
+
+    redrawFiltered();
+  };
+
+  document.querySelector('#toggle-veh input').addEventListener('change', e => {
+    showVeh = e.target.checked;
+    nodeLayer.draw();
+    updateLegend();
+  });
+
+  document.querySelector('#toggle-ped input').addEventListener('change', e => {
+    showPed = e.target.checked;
+    nodeLayer.draw();
+    updateLegend();
+  });
+
+  areaEl.addEventListener('change', e => {
+    filterArea = parseInt(e.target.value, 10);
+    if (filterArea >= 0) {
+      const col = filterArea % 8;
+      const row = Math.floor(filterArea / 8);
+      const cx  = -3000 + col * 750 + 375;
+      const cy  = -3000 + row * 750 + 375;
+      map.setView([cy, cx], 2, { animate: true });
+    }
+    redrawFiltered();
+  });
+  zMinEl.addEventListener('input', applyAdvancedFilters);
+  zMaxEl.addEventListener('input', applyAdvancedFilters);
+  linksMinEl.addEventListener('input', applyAdvancedFilters);
+  linksMaxEl.addEventListener('input', applyAdvancedFilters);
+  flagModeEl.addEventListener('change', applyAdvancedFilters);
+  for (const { el } of flagInputs) el.addEventListener('change', applyAdvancedFilters);
+
+  document.getElementById('btn-reset-filters').addEventListener('click', () => {
+    areaEl.value = '-1';
+    zMinEl.value = '';
+    zMaxEl.value = '';
+    linksMinEl.value = '';
+    linksMaxEl.value = '';
+    flagModeEl.value = 'any';
+    for (const { el } of flagInputs) el.checked = false;
+
+    filterArea = -1;
+    filterZMin = null;
+    filterZMax = null;
+    filterLinksMin = null;
+    filterLinksMax = null;
+    filterVehFlagMask = 0;
+    filterVehFlagMode = 'any';
+
+    zMinEl.style.borderColor = '';
+    zMaxEl.style.borderColor = '';
+    linksMinEl.style.borderColor = '';
+    linksMaxEl.style.borderColor = '';
+
+    redrawFiltered();
+  });
+
+  document.querySelector('#toggle-grid input').addEventListener('change', e => {
+    showGrid = e.target.checked;
+    if (showGrid) {
+      gridLayer = buildGridLayer();
+      gridLayer.addTo(map);
+    } else if (gridLayer) {
+      gridLayer.remove();
+      gridLayer = null;
+    }
+  });
+  if (showGrid && !gridLayer) {
+    gridLayer = buildGridLayer();
+    gridLayer.addTo(map);
+  }
+
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    map.fitBounds(SA_BOUNDS);
+    clearSelection();
+  });
+
+  function goToNode() {
+    const type  = document.getElementById('search-type').value;
+    const idx   = parseInt(document.getElementById('search-input').value, 10);
+    const nodes = type === 'v' ? nodesV : nodesP;
+    if (isNaN(idx) || idx < 0 || idx >= nodes.length) {
+      document.getElementById('search-input').style.borderColor = '#f87171';
+      setTimeout(() => document.getElementById('search-input').style.borderColor = '', 800);
+      return;
+    }
+    if (type === 'v' && !showVeh) {
+      document.querySelector('#toggle-veh input').checked = true;
+      showVeh = true;
+    }
+    if (type === 'p' && !showPed) {
+      document.querySelector('#toggle-ped input').checked = true;
+      showPed = true;
+    }
+    selectNode(type, idx, true);
+  }
+
+  document.getElementById('btn-goto').addEventListener('click', goToNode);
+  document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') goToNode();
+  });
+
+  document.getElementById('panel-close').addEventListener('click', clearSelection);
+  updateFiltersBadge();
+}
+
+function updateLegend() {
+  const legend = document.getElementById('legend');
+  if (!showVeh && !showPed) { legend.style.display = 'none'; return; }
+  legend.style.display = '';
+
+  const rows = [];
+  if (showVeh) {
+    rows.push(['#4ade80', 'Regular road']);
+    rows.push(['#60a5fa', 'Highway']);
+    rows.push(['#f87171', 'Emergency only']);
+    rows.push(['#22d3ee', 'Boat / water']);
+    rows.push(['#fbbf24', 'Parking']);
+  }
+  if (showPed) rows.push(['#a78bfa', 'Ped path']);
+
+  legend.innerHTML =
+    `<div class="legend-title">Node types</div>` +
+    rows.map(([c, l]) => `<div class="legend-row"><span class="dot" style="background:${c}"></span>${l}</div>`).join('');
+}
+
+async function boot() {
+  initMap();
+  initControls();
+  initPanelDrag();
+
+  const loadingEl = document.getElementById('loading');
+  const loadingTxt = document.getElementById('loading-text');
+
+  try {
+    loadingTxt.textContent = 'following the damn train...';
+    const resp = await fetch('data/nodes.json');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const data = await resp.json();
+
+    nodesV = data.v || [];
+    nodesP = data.p || [];
+    nodesVByArea = buildAreaIndex(nodesV);
+    nodesPByArea = buildAreaIndex(nodesP);
+
+    const zRangeV = getZRange(nodesV);
+    const zRangeP = getZRange(nodesP);
+    if (zRangeV || zRangeP) {
+      const minZ = Math.min(zRangeV ? zRangeV.min : Infinity, zRangeP ? zRangeP.min : Infinity);
+      const maxZ = Math.max(zRangeV ? zRangeV.max : -Infinity, zRangeP ? zRangeP.max : -Infinity);
+      document.getElementById('filter-z-min').placeholder = `min (${minZ.toFixed(0)})`;
+      document.getElementById('filter-z-max').placeholder = `max (${maxZ.toFixed(0)})`;
+    }
+
+    const linkRangeV = getLinkRange(nodesV, true);
+    const linkRangeP = getLinkRange(nodesP, false);
+    if (linkRangeV || linkRangeP) {
+      const minLinks = Math.min(linkRangeV ? linkRangeV.min : Infinity, linkRangeP ? linkRangeP.min : Infinity);
+      const maxLinks = Math.max(linkRangeV ? linkRangeV.max : -Infinity, linkRangeP ? linkRangeP.max : -Infinity);
+      document.getElementById('filter-links-min').placeholder = `min (${minLinks})`;
+      document.getElementById('filter-links-max').placeholder = `max (${maxLinks})`;
+    }
+
+    const sel = document.getElementById('filter-area');
+    for (let a = 0; a < 64; a++) {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = `NODES${a}`;
+      sel.appendChild(opt);
+    }
+
+    nodeLayer = new NodeLayer();
+    nodeLayer.addTo(map);
+    updateLegend();
+
+    setTimeout(() => loadingEl.classList.add('hidden'), 600);
+  } catch (err) {
+    loadingTxt.textContent = `Error: ${err.message}`;
+    console.error(err);
+  }
+}
+
+boot();

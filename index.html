@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>neufox's Node Viewer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="ui">
+    <header class="topbar">
+      <div class="brand">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="3" fill="#f97316"/>
+          <line x1="9" y1="0" x2="9" y2="6" stroke="#f97316" stroke-width="1.5"/>
+          <line x1="9" y1="12" x2="9" y2="18" stroke="#f97316" stroke-width="1.5"/>
+          <line x1="0" y1="9" x2="6" y2="9" stroke="#f97316" stroke-width="1.5"/>
+          <line x1="12" y1="9" x2="18" y2="9" stroke="#f97316" stroke-width="1.5"/>
+        </svg>
+        <span>neufox's Node Viewer</span>
+      </div>
+      <div class="controls">
+        <details class="toolbar-menu" id="filters-menu">
+          <summary class="btn">
+            <span>Filters</span>
+            <span id="filters-active" class="filter-badge hidden">0</span>
+          </summary>
+          <div class="menu-panel">
+            <div class="menu-section">
+              <div class="menu-title">Visibility</div>
+              <label class="toggle menu-toggle" id="toggle-veh">
+                <input type="checkbox" checked> Vehicle nodes
+              </label>
+              <label class="toggle menu-toggle" id="toggle-ped">
+                <input type="checkbox" checked> Ped nodes
+              </label>
+              <label class="toggle menu-toggle" id="toggle-grid">
+                <input type="checkbox" checked> Grid
+              </label>
+            </div>
+            <div class="menu-section">
+              <div class="menu-title">Area</div>
+              <div class="color-select menu-field">
+                <select id="filter-area">
+                  <option value="-1">all</option>
+                </select>
+              </div>
+            </div>
+            <div class="menu-section">
+              <div class="menu-title">Z Range</div>
+              <div class="z-filter">
+                <input id="filter-z-min" type="number" step="0.1" placeholder="min">
+                <span class="range-sep">to</span>
+                <input id="filter-z-max" type="number" step="0.1" placeholder="max">
+              </div>
+            </div>
+            <div class="menu-section">
+              <div class="menu-title">Links</div>
+              <div class="z-filter">
+                <input id="filter-links-min" type="number" step="1" min="0" placeholder="min">
+                <span class="range-sep">to</span>
+                <input id="filter-links-max" type="number" step="1" min="0" placeholder="max">
+              </div>
+            </div>
+            <div class="menu-section">
+              <div class="menu-title">Vehicle Flags</div>
+              <div class="menu-field">
+                <select id="filter-flag-mode">
+                  <option value="any">match any selected</option>
+                  <option value="all">match all selected</option>
+                </select>
+              </div>
+              <div class="flag-filter-grid">
+                <label class="toggle menu-toggle"><input id="flag-highway" type="checkbox"> Highway</label>
+                <label class="toggle menu-toggle"><input id="flag-not-highway" type="checkbox"> Not highway</label>
+                <label class="toggle menu-toggle"><input id="flag-emergency" type="checkbox"> Emergency</label>
+                <label class="toggle menu-toggle"><input id="flag-boat" type="checkbox"> Boat</label>
+                <label class="toggle menu-toggle"><input id="flag-parking" type="checkbox"> Parking</label>
+                <label class="toggle menu-toggle"><input id="flag-roadblock" type="checkbox"> Road block</label>
+              </div>
+            </div>
+            <div class="menu-section menu-actions">
+              <button id="btn-reset-filters" class="btn" type="button">Reset filters</button>
+            </div>
+          </div>
+        </details>
+        <div class="separator"></div>
+        <div class="node-search">
+          <select id="search-type" class="search-type-sel">
+            <option value="v">Veh</option>
+            <option value="p">Ped</option>
+          </select>
+          <input id="search-input" type="number" min="0" placeholder="node #" class="search-input">
+          <button id="btn-goto" class="btn">Go</button>
+        </div>
+        <div class="separator"></div>
+        <button id="btn-reset" class="btn">Reset view</button>
+      </div>
+    </header>
+
+    <div id="map-wrap">
+      <div id="map"></div>
+      <a
+        id="github-link"
+        href="https://github.com/itsneufox/neufox-node-viewer"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Open GitHub repository"
+        title="GitHub"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.1 0 0 .67-.21 2.2.82A7.6 7.6 0 0 1 8 4.86c.68 0 1.37.09 2.01.26 1.53-1.04 2.2-.82 2.2-.82.44 1.09.16 1.9.08 2.1.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+        <span>GitHub</span>
+      </a>
+    </div>
+
+    <div id="legend"></div>
+
+    <div id="panel" class="hidden">
+      <div class="panel-header">
+        <div class="panel-title">Node Info</div>
+        <button id="panel-close">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="info-grid">
+          <div class="info-row"><span class="info-label">Index</span><span class="info-val" id="info-idx">—</span></div>
+          <div class="info-row"><span class="info-label">Type</span><span class="info-val" id="info-type">—</span></div>
+          <div class="info-row"><span class="info-label">Area</span><span class="info-val" id="info-area">—</span></div>
+          <div class="info-row"><span class="info-label">X</span><span class="info-val mono" id="info-x">—</span></div>
+          <div class="info-row"><span class="info-label">Y</span><span class="info-val mono" id="info-y">—</span></div>
+          <div class="info-row"><span class="info-label">Z</span><span class="info-val mono" id="info-z">—</span></div>
+          <div class="info-row"><span class="info-label">Sector</span><span class="info-val" id="info-sector">—</span></div>
+          <div class="info-row"><span class="info-label">Connections</span><span class="info-val" id="info-links">—</span></div>
+          <div class="info-row"><span class="info-label">Flags</span><span class="info-val mono small" id="info-flags">—</span></div>
+        </div>
+        <div class="flag-tags" id="flag-tags"></div>
+        <div class="neighbors-title">Connected nodes</div>
+        <div class="neighbors" id="neighbor-list"></div>
+      </div>
+    </div>
+
+    <div id="loading">
+      <div class="spinner"></div>
+      <div id="loading-text">following the damn train...</div>
+    </div>
+
+    <div id="coords-display"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
