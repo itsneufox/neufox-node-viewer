@@ -33,6 +33,10 @@ python3 extract.py
 python3 -m http.server 8080
 ```
 
+## Releasing
+
+Bump the `?v=` number on the `style.css`, `i18n.js` and `app.js` links in `index.html` whenever those files change: browsers keep scripts cached for hours, and the version makes them fetch the new ones.
+
 ## File format
 
 Each node file has a 20-byte header, followed by vehicle nodes, ped nodes, navi nodes, and a links table. Coordinates are stored as signed 16-bit integers divided by 8 to get world units.
