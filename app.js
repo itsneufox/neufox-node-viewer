@@ -59,7 +59,7 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-let map, nodeLayer, gridLayer;
+let map, nodeLayer, nodeTiles, gridLayer;
 let nodesV = [], nodesP = [];
 let nodesVByArea = [];
 let nodesPByArea = [];
@@ -76,6 +76,9 @@ let showGrid    = true;
 let selectedType = null, selectedIdx = -1;
 let hoverRafId = null;
 let hoverPendingPoint = null;
+// Precomputed at load: node colours and each link drawn once.
+let colorsV = [], linksV = [], linksP = [];
+let maxLinkLen = 0;
 
 function initMap() {
   map = L.map('map', {
@@ -90,6 +93,8 @@ function initMap() {
 
   L.imageOverlay('samap.png', SA_BOUNDS).addTo(map);
   map.fitBounds(SA_BOUNDS);
+  map.createPane('nodes').style.zIndex = 450;     // above the map image and grid lines
+  map.createPane('selection').style.zIndex = 460; // selected node on top of the nodes
 
   map.on('mousemove', e => {
     const { lat, lng } = e.latlng;
@@ -248,7 +253,7 @@ const NodeLayer = L.Layer.extend({
     this._canvas = document.createElement('canvas');
     this._ctx = this._canvas.getContext('2d');
     this._canvas.className = 'node-canvas leaflet-zoom-animated';
-    map.getPanes().overlayPane.appendChild(this._canvas);
+    map.getPane('selection').appendChild(this._canvas);
     map.on('resize', this._schedule, this);
     map.on('move', this._scheduleMove, this);
     map.on('moveend', this._schedule, this);
@@ -333,12 +338,7 @@ const NodeLayer = L.Layer.extend({
     const zoom   = map.getZoom();
     this._drawZoom = zoom;
     this._drawTopLeftLatLng = map.layerPointToLatLng(topLeft);
-    const r      = Math.max(1.5, Math.min(5, zoom + 3));
-    const bounds = map.getBounds();
-    const south  = bounds.getSouth(), north = bounds.getNorth();
-    const west   = bounds.getWest(),  east  = bounds.getEast();
-    const PAD    = 50;
-    const visibleAreas = getVisibleAreas(bounds, PAD);
+    const r      = nodeRadius(zoom);
     const scale  = map.options.crs.scale(zoom);
     const origin = map.getPixelOrigin();
     const pane   = map._getMapPanePos();
@@ -346,86 +346,6 @@ const NodeLayer = L.Layer.extend({
     const offY   = -origin.y + pane.y;
     const toX    = (sa_x) =>  scale * sa_x + offX;
     const toY    = (sa_y) => -scale * sa_y + offY;
-
-    const collectGroups = (nodes, areaBuckets, isVeh) => {
-      const groups = new Map();
-
-      for (const area of visibleAreas) {
-        const bucket = areaBuckets[area];
-        if (!bucket || !bucket.length) continue;
-        for (const i of bucket) {
-          const node = nodes[i];
-          const nx = node[IDX_X], ny = node[IDX_Y];
-          if (ny < south - PAD || ny > north + PAD) continue;
-          if (nx < west  - PAD || nx > east  + PAD) continue;
-          if (!passesNodeFilters(node, isVeh)) continue;
-          const color = isVeh ? getVehColor(node[IDX_V_FLAGS]) : 'rgba(167,139,250,1)';
-          if (!groups.has(color)) groups.set(color, []);
-          groups.get(color).push(i);
-        }
-      }
-      return groups;
-    };
-
-    const drawConnections = (nodes, isVeh, groups) => {
-      if (zoom < -1 || !groups) return;
-      ctx.lineWidth = Math.max(0.5, r * 0.4);
-      for (const [color, indices] of groups) {
-        ctx.strokeStyle = color;
-        ctx.beginPath();
-        for (const i of indices) {
-          const node = nodes[i];
-          const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
-          const adj = isVeh ? node[IDX_V_ADJ] : node[IDX_P_ADJ];
-          if (!adj || !adj.length) continue;
-          for (const nidx of adj) {
-            const nb = nodes[nidx];
-            if (!nb) continue;
-            ctx.moveTo(px, py);
-            ctx.lineTo(toX(nb[IDX_X]), toY(nb[IDX_Y]));
-          }
-        }
-        ctx.stroke();
-      }
-    };
-
-    const drawNodes = (nodes, groups) => {
-      if (!groups) return;
-      for (const [color, indices] of groups) {
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        for (const i of indices) {
-          const node = nodes[i];
-          const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
-          ctx.moveTo(px + r, py);
-          ctx.arc(px, py, r, 0, Math.PI * 2);
-        }
-        ctx.fill();
-      }
-
-      if (r >= 3) {
-        const ir = r * 0.42;
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.beginPath();
-        for (const indices of groups.values()) {
-          for (const i of indices) {
-            const node = nodes[i];
-            const px = toX(node[IDX_X]), py = toY(node[IDX_Y]);
-            ctx.moveTo(px + ir, py);
-            ctx.arc(px, py, ir, 0, Math.PI * 2);
-          }
-        }
-        ctx.fill();
-      }
-    };
-
-    const pedGroups = (showPed && nodesP.length) ? collectGroups(nodesP, nodesPByArea, false) : null;
-    const vehGroups = (showVeh && nodesV.length) ? collectGroups(nodesV, nodesVByArea, true) : null;
-
-    drawConnections(nodesP, false, pedGroups);
-    drawConnections(nodesV, true, vehGroups);
-    drawNodes(nodesP, pedGroups);
-    drawNodes(nodesV, vehGroups);
 
     if (selectedIdx >= 0) {
       const nodes = selectedType === 'v' ? nodesV : nodesP;
@@ -490,6 +410,171 @@ const NodeLayer = L.Layer.extend({
     }
   }
 });
+
+function nodeRadius(zoom) {
+  return Math.max(1.5, Math.min(5, zoom + 3));
+}
+
+// Unique links: a mutual pair i<->j is drawn once, by the lower index, unless that end is filtered out.
+function buildLinks(nodes, isVeh) {
+  const adjOf = n => (isVeh ? n[IDX_V_ADJ] : n[IDX_P_ADJ]) || [];
+  const out = new Array(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const own = [], shared = [];
+    for (const j of adjOf(nodes[i])) {
+      const nb = nodes[j];
+      if (!nb) continue;
+      const len = Math.hypot(nb[IDX_X] - nodes[i][IDX_X], nb[IDX_Y] - nodes[i][IDX_Y]);
+      if (len > maxLinkLen) maxLinkLen = len;
+      if (j < i && adjOf(nb).includes(i)) shared.push(j); // the other end usually draws it
+      else own.push(j);
+    }
+    out[i] = { own, shared };
+  }
+  return out;
+}
+
+function areasInBox(west, east, south, north) {
+  if (filterArea !== -1) return [filterArea];
+  if (east < -3000 || west > 3000 || north < -3000 || south > 3000) return [];
+  const c0 = Math.max(0, Math.min(7, Math.floor((west + 3000) / 750)));
+  const c1 = Math.max(0, Math.min(7, Math.floor((east + 3000) / 750)));
+  const r0 = Math.max(0, Math.min(7, Math.floor((south + 3000) / 750)));
+  const r1 = Math.max(0, Math.min(7, Math.floor((north + 3000) / 750)));
+  const areas = [];
+  for (let row = r0; row <= r1; row++) for (let col = c0; col <= c1; col++) areas.push(row * 8 + col);
+  return areas;
+}
+
+// Draws one map tile of nodes and links. Tiles are cached by Leaflet, so panning costs nothing.
+function drawNodeTile(ctx, zoom, ox, oy, size) {
+  const scale = Math.pow(2, zoom);
+  const toX = x => x * scale - ox;
+  const toY = y => -y * scale - oy;
+  const r = nodeRadius(zoom);
+  const nodePad = (r + 2) / scale;
+  const links = zoom >= -1;
+  const pad = nodePad + (links ? maxLinkLen : 0);
+  const west = ox / scale, east = (ox + size) / scale;
+  const north = -oy / scale, south = -(oy + size) / scale;
+  const areas = areasInBox(west - pad, east + pad, south - pad, north + pad);
+
+  const collect = (nodes, buckets, isVeh) => {
+    const groups = new Map();
+    for (const area of areas) {
+      const bucket = buckets[area];
+      if (!bucket) continue;
+      for (const i of bucket) {
+        const n = nodes[i];
+        const x = n[IDX_X], y = n[IDX_Y];
+        if (x < west - pad || x > east + pad || y < south - pad || y > north + pad) continue;
+        if (!passesNodeFilters(n, isVeh)) continue;
+        const color = isVeh ? colorsV[i] : 'rgba(167,139,250,1)';
+        let g = groups.get(color);
+        if (!g) groups.set(color, (g = []));
+        g.push(i);
+      }
+    }
+    return groups;
+  };
+
+  const drawLinks = (nodes, linkTable, isVeh, groups) => {
+    if (!links) return;
+    ctx.lineWidth = Math.max(0.5, r * 0.4);
+    for (const [color, indices] of groups) {
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      for (const i of indices) {
+        const n = nodes[i];
+        const px = toX(n[IDX_X]), py = toY(n[IDX_Y]);
+        const { own, shared } = linkTable[i];
+        for (const j of own) {
+          const nb = nodes[j];
+          ctx.moveTo(px, py);
+          ctx.lineTo(toX(nb[IDX_X]), toY(nb[IDX_Y]));
+        }
+        for (const j of shared) {
+          if (passesNodeFilters(nodes[j], isVeh)) continue; // drawn from the other end
+          const nb = nodes[j];
+          ctx.moveTo(px, py);
+          ctx.lineTo(toX(nb[IDX_X]), toY(nb[IDX_Y]));
+        }
+      }
+      ctx.stroke();
+    }
+  };
+
+  const inTile = n => n[IDX_X] >= west - nodePad && n[IDX_X] <= east + nodePad && n[IDX_Y] >= south - nodePad && n[IDX_Y] <= north + nodePad;
+
+  const drawNodes = (nodes, groups) => {
+    const square = r <= 2.5; // indistinguishable from a circle at this size, and far cheaper
+    for (const [color, indices] of groups) {
+      ctx.fillStyle = color;
+      if (square) {
+        const side = r * 1.8;
+        for (const i of indices) {
+          const n = nodes[i];
+          if (!inTile(n)) continue;
+          ctx.fillRect(toX(n[IDX_X]) - side / 2, toY(n[IDX_Y]) - side / 2, side, side);
+        }
+        continue;
+      }
+      ctx.beginPath();
+      for (const i of indices) {
+        const n = nodes[i];
+        if (!inTile(n)) continue;
+        const px = toX(n[IDX_X]), py = toY(n[IDX_Y]);
+        ctx.moveTo(px + r, py);
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+    if (r >= 3) {
+      const ir = r * 0.42;
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      for (const indices of groups.values()) {
+        for (const i of indices) {
+          const n = nodes[i];
+          if (!inTile(n)) continue;
+          const px = toX(n[IDX_X]), py = toY(n[IDX_Y]);
+          ctx.moveTo(px + ir, py);
+          ctx.arc(px, py, ir, 0, Math.PI * 2);
+        }
+      }
+      ctx.fill();
+    }
+  };
+
+  const pedGroups = (showPed && nodesP.length) ? collect(nodesP, nodesPByArea, false) : null;
+  const vehGroups = (showVeh && nodesV.length) ? collect(nodesV, nodesVByArea, true) : null;
+  if (pedGroups) drawLinks(nodesP, linksP, false, pedGroups);
+  if (vehGroups) drawLinks(nodesV, linksV, true, vehGroups);
+  if (pedGroups) drawNodes(nodesP, pedGroups);
+  if (vehGroups) drawNodes(nodesV, vehGroups);
+}
+
+const NodeTiles = L.GridLayer.extend({
+  createTile(coords) {
+    const size = this.getTileSize();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const tile = document.createElement('canvas');
+    tile.width = Math.round(size.x * dpr);
+    tile.height = Math.round(size.y * dpr);
+    tile.style.width = `${size.x}px`;
+    tile.style.height = `${size.y}px`;
+    const ctx = tile.getContext('2d');
+    ctx.scale(dpr, dpr);
+    drawNodeTile(ctx, coords.z, coords.x * size.x, coords.y * size.y, size.x);
+    return tile;
+  },
+});
+
+// Nodes (tiles) and the selection overlay after a filter or visibility change.
+function redrawNodes() {
+  if (nodeTiles) nodeTiles.redraw();
+  if (nodeLayer) nodeLayer.draw();
+}
 
 function hideHoverTooltip() {
   const el = document.getElementById('hover-tooltip');
@@ -664,7 +749,7 @@ function showPanel(type, idx) {
   const sectorY   = -3000 + sectorRow * 750;
 
   document.getElementById('info-idx').textContent    = idx;
-  document.getElementById('info-type').textContent   = type === 'v' ? 'Vehicle' : 'Pedestrian';
+  document.getElementById('info-type').textContent   = t(type === 'v' ? 'Vehicle' : 'Pedestrian');
   document.getElementById('info-area').textContent   = `${area}`;
   document.getElementById('info-x').textContent      = x.toFixed(1);
   document.getElementById('info-y').textContent      = y.toFixed(1);
@@ -697,12 +782,12 @@ function showPanel(type, idx) {
         `<span class="nb-idx">#${nidx}</span>` +
         `<span class="nb-coords">(${nb[IDX_X].toFixed(0)}, ${nb[IDX_Y].toFixed(0)}, ${nb[IDX_Z].toFixed(0)})</span>` +
         `<span class="nb-area">A${nb[IDX_AREA]}</span>` +
-        `<span class="nb-dir" style="${dirStyle}">${dir.arrow} ${dir.cardinal}</span>`;
+        `<span class="nb-dir" style="${dirStyle}">${dir.arrow} ${t(dir.cardinal)}</span>`;
       btn.addEventListener('click', () => selectNode(type, nidx, true));
       nl.appendChild(btn);
     }
   } else {
-    nl.innerHTML = '<div style="color:var(--muted);font-size:12px">No connections</div>';
+    nl.innerHTML = `<div style="color:var(--muted);font-size:12px">${t('No connections')}</div>`;
   }
 
   document.getElementById('panel').classList.remove('hidden');
@@ -711,14 +796,14 @@ function showPanel(type, idx) {
 
 function renderFlagTags(flags) {
   const defs = [
-    { label: 'Highway',       bit: FLAG_HIGHWAY,    active: !!(flags & FLAG_HIGHWAY) },
-    { label: 'Not highway',   bit: FLAG_NOT_HIGHWAY,active: !!(flags & FLAG_NOT_HIGHWAY) },
-    { label: 'Emergency',     bit: FLAG_EMERGENCY,  active: !!(flags & FLAG_EMERGENCY) },
-    { label: 'Boat',          bit: FLAG_BOAT,       active: !!(flags & FLAG_BOAT) },
-    { label: 'Parking',       bit: FLAG_PARKING,    active: !!(flags & FLAG_PARKING) },
-    { label: 'Road block',    bit: FLAG_ROADBLOCK,  active: !!(flags & FLAG_ROADBLOCK) },
-    { label: `Traffic ${(flags >> 4) & 0x3}`,  bit: -1, active: true },
-    { label: `Links: ${flags & 0xF}`, bit: -1, active: true },
+    { label: t('Highway'),     bit: FLAG_HIGHWAY,    active: !!(flags & FLAG_HIGHWAY) },
+    { label: t('Not highway'), bit: FLAG_NOT_HIGHWAY,active: !!(flags & FLAG_NOT_HIGHWAY) },
+    { label: t('Emergency'),   bit: FLAG_EMERGENCY,  active: !!(flags & FLAG_EMERGENCY) },
+    { label: t('Boat'),        bit: FLAG_BOAT,       active: !!(flags & FLAG_BOAT) },
+    { label: t('Parking'),     bit: FLAG_PARKING,    active: !!(flags & FLAG_PARKING) },
+    { label: t('Road block'),  bit: FLAG_ROADBLOCK,  active: !!(flags & FLAG_ROADBLOCK) },
+    { label: t('Traffic {0}', (flags >> 4) & 0x3), bit: -1, active: true },
+    { label: t('Links: {0}', flags & 0xF), bit: -1, active: true },
   ];
 
   const el = document.getElementById('flag-tags');
@@ -858,7 +943,7 @@ function buildGridLayer() {
 function initControls() {
   const redrawFiltered = () => {
     clearSelection(false);
-    if (nodeLayer) nodeLayer.draw();
+    redrawNodes();
     updateFiltersBadge();
   };
 
@@ -919,13 +1004,13 @@ function initControls() {
 
   document.querySelector('#toggle-veh input').addEventListener('change', e => {
     showVeh = e.target.checked;
-    nodeLayer.draw();
+    redrawNodes();
     updateLegend();
   });
 
   document.querySelector('#toggle-ped input').addEventListener('change', e => {
     showPed = e.target.checked;
-    nodeLayer.draw();
+    redrawNodes();
     updateLegend();
   });
 
@@ -1035,29 +1120,51 @@ function updateLegend() {
 
   const rows = [];
   if (showVeh) {
-    rows.push(['#4ade80', 'Regular road']);
-    rows.push(['#60a5fa', 'Highway']);
-    rows.push(['#f87171', 'Emergency only']);
-    rows.push(['#22d3ee', 'Boat / water']);
-    rows.push(['#fbbf24', 'Parking']);
+    rows.push(['#4ade80', t('Regular road')]);
+    rows.push(['#60a5fa', t('Highway')]);
+    rows.push(['#f87171', t('Emergency only')]);
+    rows.push(['#22d3ee', t('Boat / water')]);
+    rows.push(['#fbbf24', t('Parking')]);
   }
-  if (showPed) rows.push(['#a78bfa', 'Ped path']);
+  if (showPed) rows.push(['#a78bfa', t('Ped path')]);
 
   legend.innerHTML =
-    `<div class="legend-title">Node types</div>` +
+    `<div class="legend-title">${t('Node types')}</div>` +
     rows.map(([c, l]) => `<div class="legend-row"><span class="dot" style="background:${c}"></span>${l}</div>`).join('');
+}
+
+// Data ranges shown in the filter boxes once the nodes are loaded.
+const rangeHints = { z: null, links: null };
+
+function updateRangeHints() {
+  const set = (id, word, value) => {
+    document.getElementById(id).placeholder = value === undefined ? t(word) : t(`${word} ({0})`, value);
+  };
+  set('filter-z-min', 'min', rangeHints.z?.[0]);
+  set('filter-z-max', 'max', rangeHints.z?.[1]);
+  set('filter-links-min', 'min', rangeHints.links?.[0]);
+  set('filter-links-max', 'max', rangeHints.links?.[1]);
 }
 
 async function boot() {
   initMap();
   initControls();
   initPanelDrag();
+  setLanguage(detectLanguage());
+  updateRangeHints();
+  const langSel = document.getElementById('lang-select');
+  langSel.value = i18nLang;
+  langSel.addEventListener('change', e => setLanguage(e.target.value, () => {
+    updateLegend();
+    updateRangeHints();
+    if (selectedIdx >= 0) showPanel(selectedType, selectedIdx);
+  }));
 
   const loadingEl = document.getElementById('loading');
   const loadingTxt = document.getElementById('loading-text');
 
   try {
-    loadingTxt.textContent = 'following the damn train...';
+    loadingTxt.textContent = t('following the damn train...');
     const resp = await fetch('data/nodes.json');
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
@@ -1067,14 +1174,16 @@ async function boot() {
     nodesP = data.p || [];
     nodesVByArea = buildAreaIndex(nodesV);
     nodesPByArea = buildAreaIndex(nodesP);
+    colorsV = nodesV.map(n => getVehColor(n[IDX_V_FLAGS]));
+    linksV = buildLinks(nodesV, true);
+    linksP = buildLinks(nodesP, false);
 
     const zRangeV = getZRange(nodesV);
     const zRangeP = getZRange(nodesP);
     if (zRangeV || zRangeP) {
       const minZ = Math.min(zRangeV ? zRangeV.min : Infinity, zRangeP ? zRangeP.min : Infinity);
       const maxZ = Math.max(zRangeV ? zRangeV.max : -Infinity, zRangeP ? zRangeP.max : -Infinity);
-      document.getElementById('filter-z-min').placeholder = `min (${minZ.toFixed(0)})`;
-      document.getElementById('filter-z-max').placeholder = `max (${maxZ.toFixed(0)})`;
+      rangeHints.z = [minZ.toFixed(0), maxZ.toFixed(0)];
     }
 
     const linkRangeV = getLinkRange(nodesV, true);
@@ -1082,8 +1191,7 @@ async function boot() {
     if (linkRangeV || linkRangeP) {
       const minLinks = Math.min(linkRangeV ? linkRangeV.min : Infinity, linkRangeP ? linkRangeP.min : Infinity);
       const maxLinks = Math.max(linkRangeV ? linkRangeV.max : -Infinity, linkRangeP ? linkRangeP.max : -Infinity);
-      document.getElementById('filter-links-min').placeholder = `min (${minLinks})`;
-      document.getElementById('filter-links-max').placeholder = `max (${maxLinks})`;
+      rangeHints.links = [minLinks, maxLinks];
     }
 
     const sel = document.getElementById('filter-area');
@@ -1094,13 +1202,25 @@ async function boot() {
       sel.appendChild(opt);
     }
 
+    updateRangeHints();
+    nodeTiles = new NodeTiles({
+      pane: 'nodes',
+      tileSize: 256,
+      minZoom: map.getMinZoom(),
+      maxZoom: map.getMaxZoom(),
+      noWrap: true,
+      bounds: L.latLngBounds(SA_BOUNDS).pad(0.05),
+      keepBuffer: 4,
+      updateWhenZooming: false,
+    });
+    nodeTiles.addTo(map);
     nodeLayer = new NodeLayer();
     nodeLayer.addTo(map);
     updateLegend();
 
     setTimeout(() => loadingEl.classList.add('hidden'), 600);
   } catch (err) {
-    loadingTxt.textContent = `Error: ${err.message}`;
+    loadingTxt.textContent = t('Error: {0}', t(err.message));
     console.error(err);
   }
 }

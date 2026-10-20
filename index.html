@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2">
 </head>
 <body>
   <div id="ui">
@@ -26,7 +26,7 @@
         <details class="toolbar-menu" id="filters-menu">
           <summary class="btn">
             <span>Filters</span>
-            <span id="filters-active" class="filter-badge hidden">0</span>
+            <span id="filters-active" class="filter-badge hidden" data-no-i18n>0</span>
           </summary>
           <div class="menu-panel">
             <div class="menu-section">
@@ -55,17 +55,17 @@
             <div class="menu-section">
               <div class="menu-title">Z Range</div>
               <div class="z-filter">
-                <input id="filter-z-min" type="number" step="0.1" placeholder="min">
+                <input id="filter-z-min" type="number" step="0.1" placeholder="min" data-no-i18n>
                 <span class="range-sep">to</span>
-                <input id="filter-z-max" type="number" step="0.1" placeholder="max">
+                <input id="filter-z-max" type="number" step="0.1" placeholder="max" data-no-i18n>
               </div>
             </div>
             <div class="menu-section">
               <div class="menu-title">Links</div>
               <div class="z-filter">
-                <input id="filter-links-min" type="number" step="1" min="0" placeholder="min">
+                <input id="filter-links-min" type="number" step="1" min="0" placeholder="min" data-no-i18n>
                 <span class="range-sep">to</span>
-                <input id="filter-links-max" type="number" step="1" min="0" placeholder="max">
+                <input id="filter-links-max" type="number" step="1" min="0" placeholder="max" data-no-i18n>
               </div>
             </div>
             <div class="menu-section">
@@ -101,12 +101,16 @@
         </div>
         <div class="separator"></div>
         <button id="btn-reset" class="btn">Reset view</button>
+        <select id="lang-select" class="search-type-sel" title="Language" data-no-i18n>
+          <option value="en">EN</option>
+          <option value="pt">PT</option>
+        </select>
       </div>
     </header>
 
     <div id="map-wrap">
       <div id="map"></div>
-      <div id="hover-tooltip" class="hidden" aria-hidden="true"></div>
+      <div id="hover-tooltip" class="hidden" aria-hidden="true" data-no-i18n></div>
       <a
         id="github-link"
         href="https://github.com/itsneufox/neufox-node-viewer"
@@ -122,17 +126,17 @@
       </a>
     </div>
 
-    <div id="legend"></div>
+    <div id="legend" data-no-i18n></div>
 
     <div id="panel" class="hidden">
       <div class="panel-header">
         <div class="panel-title">Node Info</div>
-        <button id="panel-close">✕</button>
+        <button id="panel-close" title="Close" aria-label="Close">✕</button>
       </div>
       <div class="panel-body">
         <div class="info-grid">
           <div class="info-row"><span class="info-label">Index</span><span class="info-val" id="info-idx">—</span></div>
-          <div class="info-row"><span class="info-label">Type</span><span class="info-val" id="info-type">—</span></div>
+          <div class="info-row"><span class="info-label">Type</span><span class="info-val" id="info-type" data-no-i18n>—</span></div>
           <div class="info-row"><span class="info-label">Area</span><span class="info-val" id="info-area">—</span></div>
           <div class="info-row"><span class="info-label">X</span><span class="info-val mono" id="info-x">—</span></div>
           <div class="info-row"><span class="info-label">Y</span><span class="info-val mono" id="info-y">—</span></div>
@@ -141,21 +145,22 @@
           <div class="info-row"><span class="info-label">Connections</span><span class="info-val" id="info-links">—</span></div>
           <div class="info-row"><span class="info-label">Flags</span><span class="info-val mono small" id="info-flags">—</span></div>
         </div>
-        <div class="flag-tags" id="flag-tags"></div>
+        <div class="flag-tags" id="flag-tags" data-no-i18n></div>
         <div class="neighbors-title">Connected nodes</div>
-        <div class="neighbors" id="neighbor-list"></div>
+        <div class="neighbors" id="neighbor-list" data-no-i18n></div>
       </div>
     </div>
 
     <div id="loading">
       <div class="spinner"></div>
-      <div id="loading-text">following the damn train...</div>
+      <div id="loading-text" data-no-i18n>following the damn train...</div>
     </div>
 
-    <div id="coords-display"></div>
+    <div id="coords-display" data-no-i18n></div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js"></script>
+  <script src="i18n.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

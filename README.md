@@ -2,6 +2,8 @@
 
 Interactive map viewer for GTA San Andreas path nodes. Click any node to see its connections to adjacent nodes.
 
+Available in English and Português (Brasil): it follows your browser language, and the **EN / PT** picker in the top bar switches it.
+
 ## What are path nodes?
 
 GTA SA uses a system of 64 `NODES*.DAT` files (one per 750×750 unit sector) to define where vehicles and pedestrians can drive/walk. Each node is a point in 3D space; connections between nodes form the road/path network the game uses for navigation.

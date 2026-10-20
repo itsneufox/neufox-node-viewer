@@ -111,7 +111,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .search-type-sel {
   background: var(--surface2); border: 1px solid var(--border);
   color: var(--muted); padding: 3px 5px; border-radius: 4px; font-size: 12px;
-  cursor: pointer; outline: none; width: 52px;
+  cursor: pointer; outline: none; width: auto; min-width: 52px;
 }
 .search-input {
   background: var(--surface2); border: 1px solid var(--border);
